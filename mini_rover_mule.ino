@@ -1,104 +1,99 @@
 /*
 ================================================================================
-  URC 2027 Mini-Rover Firmware (v6 - SH1107 OLED & NeoPixel Timing Fix)
-  Target Architecture: Arduino Uno R4 WiFi
-  
-  Updates:
-    - Implemented switch-case LED handler with static state tracking.
-    - Preserved non-blocking millis() logic to prevent dropped UDP packets.
-    - Fully commented for educational reference and hardware debugging.
+  URC 2027 Mini-Rover Firmware (v6.1 - Unified GP-20U7 GPS & SH1107 Fix)
 ================================================================================
 */
 
-#include <Wire.h>               // I2C communication library (used for sensors/displays)
-#include <WiFiS3.h>             // Core Wi-Fi library for the Arduino Uno R4
-#include <WiFiUdp.h>            // Enables sending and receiving UDP packets
-#include <Adafruit_GFX.h>       // Core graphics drawing library for OLED
-#include <Adafruit_SH110X.h>    // Specific driver for the SH1107 OLED screen
-#include <Adafruit_NeoPixel.h>  // Library to control the WS2812 RGB LED
-#include <Adafruit_MPU6050.h>   // Library for the gyroscope/accelerometer
-#include <Adafruit_Sensor.h>    // Unified sensor formatting for Adafruit libraries
+#include <Wire.h>               // I2C communication library
+#include <WiFiS3.h>             // Uno R4 WiFi core library
+#include <WiFiUdp.h>            // UDP networking
+#include <Adafruit_GFX.h>       // Core graphics drawing library
+#include <Adafruit_SH110X.h>    // Fixed SH1107 OLED driver
+#include <Adafruit_NeoPixel.h>  // RGB LED driver
+#include <Adafruit_MPU6050.h>   // IMU driver
+#include <Adafruit_Sensor.h>    // Unified sensor formatting
 
-#include "pin_map.h"            // Custom header containing your specific pin numbers
+#include "pin_map.h"            // Custom hardware definitions
 
 // ================================================================================
 // WI-FI & UDP TELEOPERATION CONFIGURATION
 // ================================================================================
-char ssid[] = "Linksys Blue";      // Your local Wi-Fi network name
-char pass[] = "MF114363";          // Your local Wi-Fi password
-unsigned int localPort = 4210;     // The UDP port the rover listens to for commands
+char ssid[] = "Linksys Blue";      // Home router network name
+char pass[] = "MF114363";          // Home router password
+unsigned int localPort = 4210;     // UDP Port to listen for commands
 
-WiFiUDP Udp;                       // Creates a UDP instance to handle incoming network data
-char packetBuffer[255];            // Array to store incoming network messages
-IPAddress roverIP;                 // Stores the IP address assigned by the router
+WiFiUDP Udp;
+char packetBuffer[255];
 
 // ================================================================================
 // URC LED MODES & HARDWARE INSTANCES
 // ================================================================================
-// Enums give readable names to states instead of just using random numbers (0, 1, 2)
 enum UrcLedMode {
-  MODE_TELEOP,   // State 0: Solid Blue (Manual driving)
-  MODE_AUTO,     // State 1: Solid Red (Autonomous navigation)
-  MODE_ARRIVED   // State 2: Flashing Green (Target reached)
+  MODE_TELEOP,   // Solid Blue
+  MODE_AUTO,     // Solid Red
+  MODE_ARRIVED   // Flashing Green
 };
 
-UrcLedMode currentLedMode = MODE_TELEOP; // Set the default startup state
+UrcLedMode currentLedMode = MODE_TELEOP;
 
-// Initialize the NeoPixel (1 LED, on the defined pin, using standard GRB 800KHz data)
 Adafruit_NeoPixel pixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
-
-// Initialize the OLED screen. 64x128 resolution, connected to the Qwiic bus (&Wire1)
-Adafruit_SH1107 display = Adafruit_SH1107(64, 128, &Wire1);
-
-// Initialize the IMU (Inertial Measurement Unit)
+Adafruit_SH1107 display = Adafruit_SH1107(64, 128, &Wire1); // Using Qwiic Bus
 Adafruit_MPU6050 mpu;
 
-// System status flags used to prevent the code from crashing if hardware unplugs
 bool oledConnected = false;
 bool mpuConnected = false;
-int oledScreenPage = 0; // Tracks which telemetry page to show (0 to 3)
+bool gpsFix = false;
+int oledScreenPage = 0; // Tracks the current screen page (0 to 4)
 
-// 'volatile' tells the compiler these variables change inside hardware interrupts.
-// This prevents the compiler from optimizing them out or caching old values.
+// GPS Variables
+String gpsLatitude = "Searching...";
+String gpsLongitude = "Searching...";
+int gpsSatellites = 0;
+String nmeaBuffer = ""; 
+
+// Encoder Counters (volatile for hardware interrupts)
 volatile long countFL = 0, countRL = 0, countFR = 0, countRR = 0;
 
-// Non-blocking timers. We use millis() instead of delay() so the main loop never stops running.
+// Non-blocking Timers
 unsigned long lastOledUpdate = 0;
 unsigned long lastGreenFlash = 0;
-bool greenFlashState = false; // Tracks if the green LED is currently on or off during flashing
+bool greenFlashState = false;
 
-// Global variables to store the current driving commands
+// Driver Telemetry
 int currentThrottle = 0;
 int currentSteering = 0;
 
-// Interrupt Service Routines (ISRs) for the wheel encoders.
-// These run instantly in the background every time a wheel magnet passes the sensor.
+// Interrupt Service Routines for Wheel Encoders
 void ISR_FL() { countFL++; }
 void ISR_RL() { countRL++; }
 void ISR_FR() { countFR++; }
 void ISR_RR() { countRR++; }
 
-// Function Declarations (Tells the compiler these functions exist further down in the file)
+// Function Declarations
+void readGpsData();
+void parseNmeaSentence(String sentence);
 void handleUdpPackets();
 void handleSerialCommands();
-void handleOledButtons();
+void handleOledButton();
 void updateUrcLed();
 void executeMotorDrive(int throttle, int steering);
 void stopMotors();
 void renderOledTelemetry();
 
 // ================================================================================
-// SETUP - Runs once when the Arduino turns on
+// SETUP
 // ================================================================================
 void setup() {
-  Serial.begin(115200); // Start the USB serial connection for debugging on the computer
-  delay(1000); // Brief pause to allow the Serial Monitor to connect
+  Serial.begin(115200);
+  delay(1000); 
 
   Serial.println(F("\n=============================================="));
-  Serial.println(F("   URC MINI-ROVER FIRMWARE V6 (SH1107 FIX)    "));
+  Serial.println(F(" URC MINI-ROVER FIRMWARE V6.1 (UNIFIED GPS)   "));
   Serial.println(F("=============================================="));
 
-  // Configure all motor control pins as outputs
+  Serial1.begin(GPS_BAUD_RATE); // Start Hardware Serial1 for GP-20U7 GPS
+
+  // Configure Motor Pins
   pinMode(PIN_MOTOR_L_IN1, OUTPUT);
   pinMode(PIN_MOTOR_L_PWM, OUTPUT);
   pinMode(PIN_MOTOR_L_IN2, OUTPUT);
@@ -107,20 +102,16 @@ void setup() {
   pinMode(PIN_MOTOR_R_IN2, OUTPUT);
   pinMode(PIN_MOTOR_STBY, OUTPUT);
 
-  // Keep the standby pin LOW initially so motors don't spin uncontrollably on startup
-  digitalWrite(PIN_MOTOR_STBY, LOW); 
+  digitalWrite(PIN_MOTOR_STBY, LOW); // Start safely disabled
 
-  // Configure the ultrasonic sonar pins
-  pinMode(PIN_SONAR_TRIG, OUTPUT); // Trigger sends the sound pulse
-  pinMode(PIN_SONAR_ECHO, INPUT);  // Echo listens for the sound bouncing back
+  // Configure Sonar
+  pinMode(PIN_SONAR_TRIG, OUTPUT);
+  pinMode(PIN_SONAR_ECHO, INPUT);
 
-  // Configure OLED buttons with internal pull-up resistors (HIGH when unpressed, LOW when pressed)
+  // Configure single OLED Button
   pinMode(PIN_OLED_BTN_A, INPUT_PULLUP);
-  pinMode(PIN_OLED_BTN_B, INPUT_PULLUP);
-  pinMode(PIN_OLED_BTN_C, INPUT_PULLUP);
 
-  // Configure encoder pins and attach their hardware interrupts
-  // 'RISING' means the interrupt triggers when the signal goes from LOW to HIGH
+  // Configure Encoders
   pinMode(PIN_ENC_FL, INPUT_PULLUP);
   pinMode(PIN_ENC_RL, INPUT_PULLUP);
   pinMode(PIN_ENC_FR, INPUT_PULLUP);
@@ -131,98 +122,119 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_FR), ISR_FR, RISING);
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_RR), ISR_RR, RISING);
 
-  // Start the NeoPixel and set its initial color based on 'currentLedMode'
+  // Initialize LED
   pixel.begin();
-  pixel.setBrightness(50); // Set brightness to ~20% so it's not blinding
+  pixel.setBrightness(50);
   updateUrcLed();
 
-  // Initialize the secondary I2C bus used by the Uno R4's Qwiic connector
+  // Initialize SH1107 OLED
   Wire1.begin();
-
-  // Attempt to connect to the OLED at I2C address 0x3C
   if (display.begin(0x3C, true)) {
     oledConnected = true;
-    display.setRotation(1); // Force landscape orientation (fixes the SH1107 bug)
+    display.setRotation(1); // Fixes orientation bug
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE); 
     display.setCursor(0, 0);
-    display.println(F("URC MINI-ROVER v6"));
+    display.println(F("URC MINI-ROVER v6.1"));
     display.println(F("OLED: SH1107 Wire1 OK"));
-    display.println(F("Initializing..."));
-    display.display(); // Push the drawing buffer to the actual screen
-    Serial.println(F("[OLED] SH1107 connected successfully on Qwiic (&Wire1) @ 0x3C"));
-  } else {
-    Serial.println(F("[OLED WARNING] SH1107 display not found on Wire1 0x3C!"));
+    display.display();
   }
 
-  // Initialize the primary I2C bus used for the IMU
+  // Initialize MPU6050
   Wire.begin();
   if (mpu.begin()) {
     mpuConnected = true;
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G); // Set G-force limits
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);      // Set rotation speed limits
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);   // Apply hardware smoothing to sensor data
-    Serial.println(F("[IMU] MPU6050 Connected on Wire (A4/A5)"));
-  } else {
-    Serial.println(F("[IMU WARNING] MPU6050 not detected on A4/A5"));
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
   }
 
-  // Connect to the Wi-Fi router
+  // Connect to Home Wi-Fi
   Serial.print(F("[WIFI] Connecting to Home Router: "));
   Serial.println(ssid);
-  
   WiFi.begin(ssid, pass); 
   
-  // Wait in a loop until the router assigns an IP address
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(F("."));
   }
   
-  // Open the UDP port to listen for incoming commands from the Python script
   Udp.begin(localPort); 
   Serial.println(F("\n[WIFI] Connected to Home Network!"));
-  Serial.print(F(" -> ROVER IP ADDR:  ")); Serial.println(WiFi.localIP()); // Print the IP needed for Python
-  Serial.print(F(" -> UDP PORT:       ")); Serial.println(localPort);
-
-  Serial.println(F("=============================================="));
-  Serial.println(F("Ready! Use Python script or Serial ('X','B','A')."));
+  Serial.print(F(" -> ROVER IP ADDR:  ")); Serial.println(WiFi.localIP());
 }
 
 // ================================================================================
-// MAIN LOOP - Runs repeatedly, thousands of times per second
+// MAIN LOOP
 // ================================================================================
 void loop() {
-  handleUdpPackets();     // 1. Check for new network commands
-  handleSerialCommands(); // 2. Check for manual keyboard typing in Serial Monitor
-  handleOledButtons();    // 3. Check if physical buttons were pressed
-  updateUrcLed();         // 4. Update the NeoPixel status color
+  readGpsData();          // Parse NMEA GPS strings
+  handleUdpPackets();     // Check for network driving commands
+  handleSerialCommands(); // Check for computer keyboard input
+  handleOledButton();     // Check physical button press
+  updateUrcLed();         // Refresh NeoPixel
 
-  // 5. Update the OLED screen, but ONLY every 150 milliseconds.
-  // Drawing to the OLED is slow. If we did this every loop, the rover would lag 
-  // and miss UDP driving packets.
+  // 150ms non-blocking OLED refresh
   if (oledConnected && (millis() - lastOledUpdate > 150)) {
-    lastOledUpdate = millis(); // Reset the timer
+    lastOledUpdate = millis();
     renderOledTelemetry();
   }
 }
 
 // ================================================================================
-// URC LED MODE HANDLER (SWITCH CASE + STATE-CHANGE OPTIMIZED)
+// GP-20U7 NMEA GPS PARSER
+// ================================================================================
+void readGpsData() {
+  while (Serial1.available()) { 
+    char c = Serial1.read();    
+    if (c == '\n') {            
+      parseNmeaSentence(nmeaBuffer); 
+      nmeaBuffer = "";          
+    } else if (c != '\r') {     
+      nmeaBuffer += c;          
+    }
+  }
+}
+
+void parseNmeaSentence(String sentence) {
+  if (sentence.startsWith("$GPGGA") || sentence.startsWith("$GNGGA")) {
+    int count = 0;
+    String tokens[15]; 
+    
+    for (int i = 0; i < sentence.length(); i++) {
+      if (sentence.charAt(i) == ',') {
+        count++;
+      } else {
+        if (count < 15) tokens[count] += sentence.charAt(i);
+      }
+    }
+
+    if (tokens[6].toInt() > 0) { // Fix quality check
+      gpsFix = true;
+      gpsLatitude = tokens[2] + " " + tokens[3]; 
+      gpsLongitude = tokens[4] + " " + tokens[5]; 
+      gpsSatellites = tokens[7].toInt();         
+    } else {
+      gpsFix = false;
+      gpsLatitude = "No Fix";
+      gpsLongitude = "No Fix";
+      gpsSatellites = tokens[7].toInt();
+    }
+  }
+}
+
+// ================================================================================
+// URC LED MODE HANDLER (OPTIMIZED)
 // ================================================================================
 void updateUrcLed() {
-  // 'static' means this variable remembers its value between function calls.
-  // It allows us to know what color the LED is currently showing without asking the LED.
   static int lastRenderedMode = -1;
 
   switch (currentLedMode) {
     case MODE_ARRIVED:
-      // In ARRIVED mode, we must evaluate time continuously to create a flashing effect.
-      if (millis() - lastGreenFlash > 250) { // Toggle every 250ms
+      if (millis() - lastGreenFlash > 250) { 
         lastGreenFlash = millis();
-        greenFlashState = !greenFlashState; // Flip the state (True->False, False->True)
-        // If state is true, set to Green. If false, set to Off (0,0,0)
+        greenFlashState = !greenFlashState; 
         pixel.setPixelColor(0, greenFlashState ? pixel.Color(0, 255, 0) : pixel.Color(0, 0, 0));
         pixel.show();
       }
@@ -230,10 +242,8 @@ void updateUrcLed() {
       break;
 
     case MODE_TELEOP:
-      // Optimization: Only push data to the hardware if the mode JUST changed.
-      // Calling pixel.show() repeatedly wastes processing power and delays the main loop.
       if (currentLedMode != lastRenderedMode) {
-        pixel.setPixelColor(0, pixel.Color(0, 0, 255)); // Solid Blue
+        pixel.setPixelColor(0, pixel.Color(0, 0, 255));
         pixel.show();
         lastRenderedMode = MODE_TELEOP;
       }
@@ -241,7 +251,7 @@ void updateUrcLed() {
 
     case MODE_AUTO:
       if (currentLedMode != lastRenderedMode) {
-        pixel.setPixelColor(0, pixel.Color(255, 0, 0)); // Solid Red
+        pixel.setPixelColor(0, pixel.Color(255, 0, 0));
         pixel.show();
         lastRenderedMode = MODE_AUTO;
       }
@@ -250,35 +260,47 @@ void updateUrcLed() {
 }
 
 // ================================================================================
-// UDP PACKET PARSER
+// OLED BUTTON HANDLING
+// ================================================================================
+void handleOledButton() {
+  static bool lastBtnA = HIGH;
+  bool btnA = digitalRead(PIN_OLED_BTN_A);
+
+  // Advance to the next screen page if pressed (0 -> 1 -> 2 -> 3 -> 4 -> 0)
+  if (btnA == LOW && lastBtnA == HIGH) {
+    oledScreenPage = (oledScreenPage + 1) % 5; 
+  }
+  
+  lastBtnA = btnA; 
+}
+
+// ================================================================================
+// UDP & SERIAL PACKET PARSERS
 // ================================================================================
 void handleUdpPackets() {
-  int packetSize = Udp.parsePacket(); // Check if a network packet arrived
+  int packetSize = Udp.parsePacket();
   if (packetSize) {
-    int len = Udp.read(packetBuffer, 255); // Read up to 255 bytes into the buffer
-    if (len > 0) packetBuffer[len] = 0;    // Add a null terminator to make it a valid String
+    int len = Udp.read(packetBuffer, 255);
+    if (len > 0) packetBuffer[len] = 0;
 
     String pktStr = String(packetBuffer);
-    pktStr.trim(); // Remove any invisible whitespace or newline characters
+    pktStr.trim();
 
-    // Parse specific string commands sent by the controller
     if (pktStr == "MODE:TELEOP" || pktStr == "BTN:X") {
       currentLedMode = MODE_TELEOP;
-      digitalWrite(PIN_MOTOR_STBY, HIGH); // Enable the motor drivers
+      digitalWrite(PIN_MOTOR_STBY, HIGH);
     } 
     else if (pktStr == "MODE:AUTO" || pktStr == "BTN:B") {
       currentLedMode = MODE_AUTO;
-      digitalWrite(PIN_MOTOR_STBY, HIGH); // Enable the motor drivers
+      digitalWrite(PIN_MOTOR_STBY, HIGH);
     } 
     else if (pktStr == "MODE:ARRIVED" || pktStr == "BTN:A") {
       currentLedMode = MODE_ARRIVED;
-      digitalWrite(PIN_MOTOR_STBY, LOW);  // HARDWARE SAFETY: Disable motor drivers entirely
-      stopMotors(); // Set PWM signals to 0
+      digitalWrite(PIN_MOTOR_STBY, LOW);
+      stopMotors();
     } 
-    // If the string contains a comma, treat it as a "throttle,steering" drive command
     else if (pktStr.indexOf(',') > 0) {
       int commaIndex = pktStr.indexOf(',');
-      // Split the string at the comma and convert both halves to integers
       currentThrottle = pktStr.substring(0, commaIndex).toInt();
       currentSteering = pktStr.substring(commaIndex + 1).toInt();
       executeMotorDrive(currentThrottle, currentSteering);
@@ -286,41 +308,26 @@ void handleUdpPackets() {
   }
 }
 
-// ================================================================================
-// SERIAL COMMAND PARSER
-// ================================================================================
 void handleSerialCommands() {
-  // Allows you to test the modes via the Arduino IDE Serial Monitor without Wi-Fi
   if (Serial.available()) {
     char c = Serial.read();
-    if (c == 'x' || c == 'X') {
-      currentLedMode = MODE_TELEOP;
-      Serial.println(F("[MODE] Switched to Teleop Mode (Solid Blue)"));
-    } else if (c == 'b' || c == 'B') {
-      currentLedMode = MODE_AUTO;
-      Serial.println(F("[MODE] Switched to Autonomous Mode (Solid Red)"));
-    } else if (c == 'a' || c == 'A') {
-      currentLedMode = MODE_ARRIVED;
-      Serial.println(F("[MODE] Target Arrival Triggered (Flashing Green)"));
-    }
+    if (c == 'x' || c == 'X') currentLedMode = MODE_TELEOP;
+    else if (c == 'b' || c == 'B') currentLedMode = MODE_AUTO;
+    else if (c == 'a' || c == 'A') currentLedMode = MODE_ARRIVED;
   }
 }
 
 // ================================================================================
-// MOTOR DRIVE CONTROL (Arcade/Differential Mix)
+// MOTOR DRIVE CONTROL
 // ================================================================================
 void executeMotorDrive(int throttle, int steering) {
-  // Mix throttle and steering, capping the final speeds between -255 and 255
   int leftSpeed = constrain(throttle + steering, -255, 255);
   int rightSpeed = constrain(throttle - steering, -255, 255);
 
-  // Left Motor Direction: If speed is positive, set IN1 HIGH, IN2 LOW. Otherwise, reverse it.
   digitalWrite(PIN_MOTOR_L_IN1, leftSpeed >= 0 ? HIGH : LOW);
   digitalWrite(PIN_MOTOR_L_IN2, leftSpeed >= 0 ? LOW : HIGH);
-  // Send PWM speed. abs() removes negative signs because analogWrite only takes 0-255.
   analogWrite(PIN_MOTOR_L_PWM, abs(leftSpeed));
 
-  // Right Motor Direction
   digitalWrite(PIN_MOTOR_R_IN1, rightSpeed >= 0 ? HIGH : LOW);
   digitalWrite(PIN_MOTOR_R_IN2, rightSpeed >= 0 ? LOW : HIGH);
   analogWrite(PIN_MOTOR_R_PWM, abs(rightSpeed));
@@ -332,90 +339,56 @@ void stopMotors() {
 }
 
 // ================================================================================
-// OLED BUTTON HANDLING 
-// ================================================================================
-void handleOledButtons() {
-  // 'static' stores the previous state of the buttons.
-  // This lets us detect the moment a button is *pressed*, rather than held down.
-  static bool lastBtnA = HIGH, lastBtnB = HIGH, lastBtnC = HIGH;
-  
-  bool btnA = digitalRead(PIN_OLED_BTN_A);
-  bool btnB = digitalRead(PIN_OLED_BTN_B);
-  bool btnC = digitalRead(PIN_OLED_BTN_C);
-
-  // If button goes from HIGH (unpressed) to LOW (pressed):
-  // The modulo operator (%) loops the page number seamlessly between 0, 1, 2, and 3.
-  if (btnA == LOW && lastBtnA == HIGH) oledScreenPage = (oledScreenPage + 3) % 4; // Cycles Backward
-  if (btnB == LOW && lastBtnB == HIGH) oledScreenPage = (oledScreenPage + 1) % 4; // Cycles Forward
-  
-  // Button C cycles through the LED operational modes physically
-  if (btnC == LOW && lastBtnC == HIGH) { 
-    if (currentLedMode == MODE_TELEOP) currentLedMode = MODE_AUTO;
-    else if (currentLedMode == MODE_AUTO) currentLedMode = MODE_ARRIVED;
-    else currentLedMode = MODE_TELEOP;
-  }
-
-  // Save current state to check against in the next loop
-  lastBtnA = btnA; lastBtnB = btnB; lastBtnC = btnC;
-}
-
-// ================================================================================
 // OLED RENDERING
 // ================================================================================
 void renderOledTelemetry() {
-  display.clearDisplay(); // Wipe the hidden buffer clean
+  display.clearDisplay();
   display.setTextSize(1);
 
-  // Calculates 12V battery voltage via a resistor voltage divider connected to A1
   float rawA1 = analogRead(PIN_BATTERY_SENSE);
   float batteryVoltage = ((rawA1 / 1023.0) * 5.0) * (13.3 / 3.3);
 
-  // Render the selected telemetry page
   switch (oledScreenPage) {
-    case 0: // PAGE 1: Core System & Network
+    case 0:
       display.setCursor(0, 0);  display.println(F("=== POWER & NETWORK ==="));
       display.setCursor(0, 14); display.print(F("IP:  ")); display.println(WiFi.localIP());
       display.setCursor(0, 26); display.print(F("Bat: ")); display.print(batteryVoltage, 2); display.println(F(" V"));
-      display.setCursor(0, 38); display.print(F("LED: "));
-      if (currentLedMode == MODE_TELEOP) display.println(F("BLUE (TELEOP)"));
-      else if (currentLedMode == MODE_AUTO) display.println(F("RED (AUTO)"));
-      else display.println(F("FLASH GREEN (ARRIVED)"));
       break;
 
-    case 1: // PAGE 2: IMU Motion Data
+    case 1:
       display.setCursor(0, 0); display.println(F("=== MPU6050 MOTION ==="));
       if (mpuConnected) {
         sensors_event_t a, g, temp;
-        mpu.getEvent(&a, &g, &temp); // Read the latest hardware sensor data
+        mpu.getEvent(&a, &g, &temp);
         display.setCursor(0, 16);
         display.print(F("Accel X: ")); display.print(a.acceleration.x, 1); display.println(F(" m/s2"));
-        display.print(F("Accel Y: ")); display.print(a.acceleration.y, 1); display.println(F(" m/s2"));
-        display.print(F("Gyro  Z: ")); display.print(g.gyro.z, 1); display.println(F(" rad/s"));
       } else {
         display.setCursor(0, 24); display.println(F("IMU Status: N/C"));
       }
       break;
 
-    case 2: // PAGE 3: Wheel Encoder Diagnostics
+    case 2:
       display.setCursor(0, 0); display.println(F("=== WHEEL ENCODERS ==="));
       display.setCursor(0, 16);
       display.print(F("FL: ")); display.print(countFL); display.print(F("  FR: ")); display.println(countFR);
       display.print(F("RL: ")); display.print(countRL); display.print(F("  RR: ")); display.println(countRR);
-      display.setCursor(0, 40);
-      display.print(F("STBY Pin: ")); display.println(digitalRead(PIN_MOTOR_STBY) ? "ENABLED" : "STANDBY");
       break;
 
-    case 3: // PAGE 4: Sonar (Placeholder for now)
+    case 3:
       display.setCursor(0, 0); display.println(F("=== HC-SR04 SONAR ==="));
-      display.setCursor(0, 24); display.println(F("Sonar: Pins A2/A3 Configured"));
-      display.println(F("Ready for sensor plug-in"));
+      break;
+
+    case 4:
+      display.setCursor(0, 0); display.println(F("=== GP-20U7 GPS NAV ==="));
+      display.setCursor(0, 14); display.print(F("Fix:  ")); display.println(gpsFix ? F("3D FIX OK") : F("SEARCHING"));
+      display.setCursor(0, 26); display.print(F("Lat:  ")); display.println(gpsLatitude);
+      display.setCursor(0, 38); display.print(F("Lon:  ")); display.println(gpsLongitude);
+      display.setCursor(0, 50); display.print(F("Sats: ")); display.println(gpsSatellites);
       break;
   }
 
-  // Draw the fixed bottom footer (Shows current page and control hints)
   display.drawFastHLine(0, 54, 128, SH110X_WHITE);
   display.setCursor(0, 56);
-  display.print(F("P")); display.print(oledScreenPage + 1); display.print(F("/4 | Btn A/B:Nav C:Mode"));
-  
-  display.display(); // Push the completed frame to the physical screen
+  display.print(F("P")); display.print(oledScreenPage + 1); display.print(F("/5 | Btn A: Next Page"));
+  display.display();
 }
