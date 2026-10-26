@@ -308,12 +308,24 @@ void handleUdpPackets() {
   }
 }
 
+// ================================================================================
+// SERIAL COMMAND PARSER (BASIC KEYBOARD CONTROLS)
+// ================================================================================
 void handleSerialCommands() {
   if (Serial.available()) {
     char c = Serial.read();
+    
+    // LED Status Modes (Changed 'a' to 'q' to free up the 'a' key for turning)
     if (c == 'x' || c == 'X') currentLedMode = MODE_TELEOP;
     else if (c == 'b' || c == 'B') currentLedMode = MODE_AUTO;
-    else if (c == 'a' || c == 'A') currentLedMode = MODE_ARRIVED;
+    else if (c == 'q' || c == 'Q') currentLedMode = MODE_ARRIVED;
+    
+    // Basic WASD Driving Commands (Instant on/off)
+    else if (c == 'w' || c == 'W') executeMotorDrive(255, 0);  // Full Forward
+    else if (c == 's' || c == 'S') executeMotorDrive(-255, 0); // Full Reverse
+    else if (c == 'a' || c == 'A') executeMotorDrive(0, -255); // Spin Left
+    else if (c == 'd' || c == 'D') executeMotorDrive(0, 255);  // Spin Right
+    else if (c == ' ') stopMotors();                           // Spacebar to stop
   }
 }
 
