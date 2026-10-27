@@ -1,0 +1,137 @@
+// N20 Motor Bench Test Script for TB6612FNG Driver
+// Outputs PWM and RPM data over Serial to the C2 laptop
+
+// ==============================================================================
+// 1. PIN DEFINITIONS (Based on the Updated Single-Phase Uno R4 WiFi Map)
+// ==============================================================================
+// 'const int' means these are integer numbers that will never change (constant).
+// We use these so we can refer to pins by name instead of just numbers.
+const int encoderPhaseA = 0; // D0: Front Left Encoder Phase A (Interrupt pin)
+const int dirPin1 = 2;       // D2: Motor Driver 1 AIN1 (Controls direction)
+const int pwmPin = 3;        // D3: Motor Driver 1 PWMA (Controls speed via PWM)
+const int dirPin2 = 4;       // D4: Motor Driver 1 AIN2 (Controls direction)
+const int standbyPin = 8;    // D8: TB6612 STBY (Must be HIGH to enable the driver)
+
+// ==============================================================================
+// 2. MOTOR & ENCODER MATH SPECIFICATIONS
+// ==============================================================================
+// 'float' means this is a number with a decimal point.
+const float gearRatio = 10.0; // The physical gear reduction of the GA12-N20 motor
+const int baseEncoderTicks = 12; // The number of magnetic pulses per single motor spin
+const float ticksPerOutputRev = gearRatio * baseEncoderTicks; // Total ticks for 1 full wheel spin (120)
+
+// ==============================================================================
+// 3. GLOBAL VARIABLES FOR RPM CALCULATION
+// ==============================================================================
+// 'volatile' tells the Arduino that this variable will change rapidly in the background
+// via a hardware interrupt, so the processor shouldn't try to compress or optimize it.
+// 'unsigned long' is a very large positive whole number (needed for counting many ticks).
+volatile unsigned long pulseCount = 0; 
+const int sampleWindow = 1000; // We will count ticks for 1000 milliseconds (1 second)
+
+// ==============================================================================
+// 4. INTERRUPT SERVICE ROUTINE (ISR)
+// ==============================================================================
+// This function runs automatically in the background every time Pin D0 sees a pulse.
+// It pauses the main code, adds 1 to the counter, and resumes the main code instantly.
+void countPulse() {
+  pulseCount++; 
+}
+
+// ==============================================================================
+// 5. SETUP FUNCTION (Runs exactly once when the Arduino turns on)
+// ==============================================================================
+void setup() {
+  // Open the USB connection to your C2 laptop at a speed of 115200 bits per second
+  Serial.begin(115200); 
+  
+  // pinMode() configures the physical pins as either sending power (OUTPUT) or reading power (INPUT)
+  pinMode(pwmPin, OUTPUT);
+  pinMode(dirPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT);
+  pinMode(standbyPin, OUTPUT);
+  
+  // INPUT_PULLUP turns on a tiny internal resistor in the Arduino. 
+  // This keeps the encoder signal stable and prevents random electrical noise from counting as a pulse.
+  pinMode(encoderPhaseA, INPUT_PULLUP);
+  
+  // attachInterrupt() tells the Arduino to watch Pin D0.
+  // When the electrical signal goes from LOW (0V) to HIGH (5V) (RISING edge), it runs countPulse().
+  attachInterrupt(digitalPinToInterrupt(encoderPhaseA), countPulse, RISING);
+  
+  // Send 5V to the Standby pin to wake up the TB6612FNG motor driver
+  digitalWrite(standbyPin, HIGH);
+  
+  // Wait 2 seconds (2000 milliseconds) so you have time to open the Serial Monitor on your laptop
+  delay(2000); 
+  
+  // Print our column headers for the data stream
+  Serial.println("Starting Motor Bench Test...");
+  Serial.println("PWM, RPM");
+}
+
+// ==============================================================================
+// 6. LOOP FUNCTION (Runs continuously in a circle forever)
+// ==============================================================================
+void loop() {
+  // A 'for' loop. It creates a variable called currentPwm starting at 0.
+  // It adds 15 to it every loop, and stops when it goes above 255 (maximum speed).
+  for (int currentPwm = 0; currentPwm <= 255; currentPwm += 15) {
+    driveMotor(currentPwm, true); // Call our custom function below to spin the motor
+    calculateAndPrintRPM(currentPwm); // Call our custom function below to do the math and print it
+  }
+
+  // After ramping up to full speed, stop the motor (0 PWM)
+  driveMotor(0, true);
+  Serial.println("Test cycle complete. Pausing for 3 seconds...");
+  delay(3000); // Pause for 3 seconds before starting the sweep over again
+}
+
+// ==============================================================================
+// 7. CUSTOM MOTOR CONTROL FUNCTION
+// ==============================================================================
+// This function takes two arguments: the speed (0-255) and the direction (true/false)
+void driveMotor(int speed, bool forward) {
+  // analogWrite sends a rapid pulsing signal (PWM) to control the voltage going to the motor
+  analogWrite(pwmPin, speed); 
+  
+  // The TB6612FNG driver requires one pin to be HIGH and the other LOW to spin.
+  // Reversing them reverses the motor direction.
+  if (forward) {
+    digitalWrite(dirPin1, HIGH);
+    digitalWrite(dirPin2, LOW);
+  } else {
+    digitalWrite(dirPin1, LOW);
+    digitalWrite(dirPin2, HIGH);
+  }
+}
+
+// ==============================================================================
+// 8. CUSTOM RPM MATH & PRINTING FUNCTION
+// ==============================================================================
+void calculateAndPrintRPM(int currentPwm) {
+  pulseCount = 0; // Reset the interrupt tick counter to 0 for a fresh measurement
+  
+  // millis() is the Arduino's internal stopwatch. It returns how many milliseconds 
+  // have passed since the board turned on. We save the current time to 'startTime'.
+  unsigned long startTime = millis();
+  
+  // A 'while' loop. This traps the code here and does nothing for exactly 1 second (sampleWindow).
+  // Even though it is trapped, the hardware interrupt (countPulse) is still running in the background!
+  while (millis() - startTime < sampleWindow) {
+    // Just wait. Do nothing until 1000ms passes.
+  }
+  
+  // Math: 
+  // 1. Convert pulseCount to a float (decimal) so the division is accurate.
+  // 2. Divide total counted pulses by 120 (ticksPerOutputRev) to get Revolutions Per Second.
+  // 3. Multiply by 60.0 to convert to Revolutions Per Minute (RPM).
+  float currentRpm = ((float)pulseCount / ticksPerOutputRev) * 60.0;
+  
+  // Send the data back to the C2 laptop terminal
+  // '\t' inserts a tab space to keep the columns neat.
+  Serial.print("PWM: ");
+  Serial.print(currentPwm);
+  Serial.print("\tRPM: ");
+  Serial.println(currentRpm); // println adds a "return" (new line) at the end
+}
