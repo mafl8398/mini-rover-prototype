@@ -26,6 +26,14 @@ WiFiUDP Udp;
 char packetBuffer[255];
 
 // ================================================================================
+// C2 Telemetry Tracking
+// ================================================================================
+unsigned long lastSerialTelemetry = 0;
+long lastCountFL = 0; // Tracks previous encoder count to calculate speed
+const float WHEEL_CIRC_METERS = 0.2042; // 65mm diameter * Pi
+const float ENCODER_PPR = 330.0; // UPDATE THIS to match your specific motor's encoder resolution
+
+// ================================================================================
 // URC LED MODES & HARDWARE INSTANCES
 // ================================================================================
 enum UrcLedMode {
@@ -179,6 +187,10 @@ void loop() {
   if (oledConnected && (millis() - lastOledUpdate > 150)) {
     lastOledUpdate = millis();
     renderOledTelemetry();
+  }
+  if (millis() - lastSerialTelemetry > 1000) {
+    lastSerialTelemetry = millis();
+    printC2Telemetry();  
   }
 }
 
@@ -403,4 +415,40 @@ void renderOledTelemetry() {
   display.setCursor(0, 56);
   display.print(F("P")); display.print(oledScreenPage + 1); display.print(F("/5 | Btn A: Next Page"));
   display.display();
+}
+
+// ================================================================================
+// C2 SERIAL TELEMETRY STREAM
+// ================================================================================
+void printC2Telemetry() {
+  // 1. Calculate Wheel Speed (Front Left Wheel)
+  long currentCountFL = countFL; 
+  long ticksThisSecond = currentCountFL - lastCountFL;
+  lastCountFL = currentCountFL;
+  
+  // Speed = (Revolutions per second) * Circumference
+  float speedMs = (ticksThisSecond / ENCODER_PPR) * WHEEL_CIRC_METERS;
+
+  // 2. Read Battery
+  float rawA1 = analogRead(PIN_BATTERY_SENSE);
+  float batteryVoltage = ((rawA1 / 1023.0) * 5.0) * (13.3 / 3.3);
+
+  // 3. Translate Enum to String for readability
+  String modeStr;
+  if (currentLedMode == MODE_TELEOP) modeStr = "TELEOP (Blue)";
+  else if (currentLedMode == MODE_AUTO) modeStr = "AUTONOMOUS (Red)";
+  else modeStr = "ARRIVED (Green)";
+
+  // 4. Print Data Block
+  Serial.println(F("\n================ C2 STATION TELEMETRY ================"));
+  Serial.print(F("SYS MODE:    ")); Serial.println(modeStr);
+  Serial.print(F("POWER:       ")); Serial.print(batteryVoltage, 2); Serial.println(F(" V"));
+  Serial.print(F("SPEED (FL):  ")); Serial.print(speedMs, 2); Serial.println(F(" m/s"));
+  Serial.print(F("MOTORS:      Thr: ")); Serial.print(currentThrottle); Serial.print(F(" | Str: ")); Serial.println(currentSteering);
+  
+  // GPS Data
+  Serial.print(F("GPS FIX:     ")); Serial.println(gpsFix ? F("ACTIVE 3D FIX") : F("SEARCHING..."));
+  Serial.print(F("GPS COORDS:  ")); Serial.print(gpsLatitude); Serial.print(F(", ")); Serial.println(gpsLongitude);
+  Serial.print(F("SATELLITES:  ")); Serial.println(gpsSatellites);
+  Serial.println(F("======================================================"));
 }
