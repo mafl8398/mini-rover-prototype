@@ -3,6 +3,19 @@
 An agile, low-cost 4WD subscale rover prototype designed to de-risk electrical architecture, wireless teleoperation over UDP, sensor fusion, and closed-loop motor control ahead of the full-scale University Rover Challenge (URC) build.
 
 ---
+##🛠️ System Overview & Architecture
+Main Compute: Arduino Uno R4 WiFi (32-bit Renesas RA4M1 @ 48 MHz + ESP32-S3 Wi-Fi/BT module)
+Motor Drivers: Dual TB6612FNG H-Bridge Drivers (7-pin bridged differential drive logic)
+Actuation: 4x GA12-N20 12V DC Metal Geared Motors in differential skid-steer configuration
+Telemetry & Sensing:
+GPS Navigation: GP-20U7 66-Channel Module (Hardware UART on D0 @ 9600 Baud)
+Inertial Navigation: MPU6050 6-DoF IMU (I2C Wire bus on A4/A5)
+Speed/Odometry: Single-Phase Magnetic Quadrature Encoders (A2, D9, D11, D13)
+Power Monitoring: 10k/3.3k Resistor Divider on Analog Pin A1 (12V sensing)
+Visual Status: Adafruit 128x64 OLED Display (STEMMA QT / Qwiic Wire1 bus)
+URC Indicator: WS2812B Smart RGB NeoPixel LED on D12
+
+---
 
 ## 🛠️ Prerequisites & Installation
 
@@ -112,6 +125,15 @@ The Adafruit 128x64 OLED FeatherWing includes 3 tactile buttons used for local d
    ```
 
 ### Control Mappings:
+Laptop Keyboard Controls:
+* **W / Up Arrow:** Drive Forward (Throttle: +200)
+* **S / Down Arrow:** Reverse (Throttle: -200)
+* **A / Left Arrow:** Spin Left (Steering: -180)
+* **D / Right Arrow:** Spin Right (Steering: +180)
+* **Spacebar:** Emergency Stop / Instant Zero Velocity (0, 0)
+* **1 / X:** Set URC LED Mode to TELEOP (Solid Blue)
+* **2 / B:** Set URC LED Mode to AUTO (Solid Red)
+* **3 / A:** Set URC LED Mode to ARRIVED (Flashing Green)
 * **Right Joystick Vertical:** Throttle (Forward / Reverse)
 * **Right Joystick Horizontal:** Steering (Left / Right Differential Turn)
 * **Button X (Blue):** Set Mode to **`TELEOP`** (Solid Blue NeoPixel)
