@@ -178,7 +178,6 @@ void setup() {
 void loop() {
   readGpsData();          // Parse NMEA GPS strings
   handleUdpPackets();     // Check for network driving commands
-  handleSerialCommands(); // Check for computer keyboard input
   handleOledButton();     // Check physical button press
   updateUrcLed();         // Refresh NeoPixel
 
